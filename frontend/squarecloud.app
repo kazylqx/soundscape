@@ -1,9 +1,0 @@
-MAIN=index.html
-RUNTIME=static
-MEMORY=512
-VERSION=recommended
-DISPLAY_NAME=Soundscape
-DESCRIPTION=Soundscape — perfil musical inteligente gerado a partir do seu Spotify
-SUBDOMAIN=soundscape
-START=npm run build
-AUTORESTART=true

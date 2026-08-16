@@ -1,0 +1,53 @@
+# ============================================================
+#  Netlify — deploy do frontend
+#
+#  O repositorio e um monorepo: `base` aponta para a pasta do frontend,
+#  e `publish` e resolvido a partir dela (frontend/dist).
+#
+#  As variaveis VITE_API_URL e VITE_SPOTIFY_REDIRECT_URI precisam estar
+#  cadastradas em Site configuration -> Environment variables. O Vite as
+#  embute no bundle durante o build, entao mudar o valor exige um novo deploy.
+# ============================================================
+
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  # Nao instala devDependencies? Instala: o build precisa de vite e tsc.
+  NPM_FLAGS = "--include=dev"
+
+# ------------------------------------------------------------
+#  Roteamento de SPA
+#  Sem isto, abrir /callback ou /dashboard direto na URL devolve 404
+#  e o login do Spotify quebra.
+# ------------------------------------------------------------
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# ------------------------------------------------------------
+#  Cabecalhos
+# ------------------------------------------------------------
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
+    Permissions-Policy = "geolocation=(), microphone=(), camera=()"
+
+# Assets tem hash no nome: podem ser cacheados para sempre.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# O HTML nunca deve ser cacheado, para o deploy novo aparecer na hora.
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

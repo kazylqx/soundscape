@@ -2,7 +2,7 @@
 
 Perfil musical inteligente construído a partir do seu Spotify: persona escrita por IA, análise sonora, mapa de gêneros, eras musicais, padrões de escuta, recomendações e cards prontos para compartilhar.
 
-Monorepo com dois apps independentes (`/backend` e `/frontend`), preparados para deploy automático na [Square Cloud](https://squarecloud.app) via GitHub Actions.
+Monorepo com dois apps independentes: o **backend** roda na [Square Cloud](https://squarecloud.app) (deploy automático via GitHub Actions) e o **frontend** no [Netlify](https://netlify.com) (deploy automático a partir do repositório).
 
 ---
 
@@ -17,7 +17,8 @@ Monorepo com dois apps independentes (`/backend` e `/frontend`), preparados para
 - [Rodando localmente](#rodando-localmente)
 - [Como a autenticação funciona](#como-a-autenticação-funciona)
 - [API do backend](#api-do-backend)
-- [Deploy na Square Cloud](#deploy-na-square-cloud)
+- [Deploy do backend na Square Cloud](#deploy-do-backend-na-square-cloud)
+- [Deploy do frontend no Netlify](#deploy-do-frontend-no-netlify)
 - [CI/CD com GitHub Actions](#cicd-com-github-actions)
 - [Limitação importante da Spotify API](#limitação-importante-da-spotify-api)
 - [Troubleshooting](#troubleshooting)
@@ -88,7 +89,6 @@ soundscape/
 │   │   ├── styles/          globals.css
 │   │   ├── App.tsx
 │   │   └── main.tsx
-│   ├── squarecloud.app
 │   ├── package.json
 │   ├── vite.config.ts
 │   ├── tailwind.config.ts
@@ -96,13 +96,13 @@ soundscape/
 │   └── .env.example
 │
 ├── .github/workflows/
-│   ├── deploy-backend.yml
-│   └── deploy-frontend.yml
+│   └── deploy-backend.yml   deploy do backend na Square Cloud
+├── netlify.toml             build e roteamento do frontend no Netlify
 ├── .gitignore
 └── README.md
 ```
 
-Por que `types/` existe nos dois lados: o frontend não importa código do backend (são apps separados na Square Cloud), então os contratos são espelhados. **Ao mudar um tipo em `backend/src/types/index.ts`, replique em `frontend/src/types/index.ts`.**
+Por que `types/` existe nos dois lados: o frontend não importa código do backend (são apps hospedados separadamente), então os contratos são espelhados. **Ao mudar um tipo em `backend/src/types/index.ts`, replique em `frontend/src/types/index.ts`.**
 
 ---
 
@@ -112,7 +112,8 @@ Por que `types/` existe nos dois lados: o frontend não importa código do backe
 - npm 10+
 - Conta no [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) (a conta do usuário final pode ser Free — **Premium não é necessário**)
 - Chave de uma API de IA compatível com o formato OpenAI Chat Completions (OpenAI, OpenRouter, Groq...) — **opcional**, o app funciona sem ela no modo fallback
-- Conta na Square Cloud com plano ativo (para o deploy)
+- Conta na Square Cloud com plano ativo (backend)
+- Conta no Netlify (frontend — o plano gratuito atende)
 
 ---
 
@@ -124,10 +125,10 @@ Por que `types/` existe nos dois lados: o frontend não importa código do backe
 
    ```
    http://127.0.0.1:5173/callback
-   https://soundscape.squareweb.app/callback
+   https://SEU-SITE.netlify.app/callback
    ```
 
-   Substitua o domínio de produção pelo subdomínio real do seu app frontend na Square Cloud.
+   Substitua `SEU-SITE` pelo nome real do site no Netlify (ou pelo domínio próprio, se você configurar um).
 
    > O Spotify não aceita mais `http://localhost` em redirect URIs — use `127.0.0.1`. A URI precisa ser idêntica (protocolo, host, porta e path) à configurada no backend e no frontend.
 
@@ -141,7 +142,7 @@ Escopos solicitados pelo app (somente leitura, nenhuma permissão de escrita):
 
 ## Variáveis de ambiente
 
-Nunca commite `.env`. Cada pasta tem um `.env.example` documentando o necessário.
+Cada pasta tem um `.env` pronto para preencher e um `.env.example` como referência. Os dois `.env` estão no `.gitignore` e **não vão para o GitHub** — em produção, os valores são cadastrados no painel de cada plataforma (Square Cloud para o backend, Netlify para o frontend).
 
 ### `backend/.env`
 
@@ -172,7 +173,7 @@ node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 
 | Variável | Descrição |
 | --- | --- |
-| `VITE_API_URL` | URL base do backend (ex.: `https://soundscape-api.squareweb.app`) |
+| `VITE_API_URL` | URL base do backend, sem barra no final (ex.: `https://soundscape-api.squareweb.app`) |
 | `VITE_SPOTIFY_REDIRECT_URI` | URL de callback, idêntica à do Spotify e à do backend |
 
 > Tudo com prefixo `VITE_` é embutido no bundle público. **Nunca** coloque client secret ou chave de IA aqui.
@@ -219,7 +220,7 @@ Scripts disponíveis:
 | backend | `npm start` | Roda `dist/app.js` |
 | backend | `npm run typecheck` | Checagem de tipos sem emitir |
 | frontend | `npm run dev` | Vite dev server |
-| frontend | `npm run build` | `tsc -b` + build de produção + gera `404.html` |
+| frontend | `npm run build` | `tsc -b` + build de produção + gera `404.html` (fallback de SPA) |
 | frontend | `npm run preview` | Serve o build local |
 
 ---
@@ -292,11 +293,9 @@ Médias das audio features, mapa de gêneros com percentuais, distribuição por
 
 ---
 
-## Deploy na Square Cloud
+## Deploy do backend na Square Cloud
 
-A Square Cloud hospeda **dois apps separados**, cada um apontando para sua pasta. O arquivo `squarecloud.app` dentro de cada pasta configura aquele app.
-
-### Backend — `Soundscape API`
+`backend/squarecloud.app`:
 
 ```
 MAIN=dist/app.js
@@ -310,54 +309,78 @@ AUTORESTART=true
 
 `square:start` compila o TypeScript e sobe o servidor (`npm run build && node dist/app.js`). Por isso `typescript` e os pacotes `@types/*` ficam em `dependencies`, e não em `devDependencies` — o compilador precisa existir no ambiente de produção.
 
-### Frontend — `Soundscape`
-
-```
-MAIN=index.html
-RUNTIME=static
-MEMORY=512
-VERSION=recommended
-DISPLAY_NAME=Soundscape
-SUBDOMAIN=soundscape
-START=npm run build
-AUTORESTART=true
-```
-
-O script `postbuild` copia `dist/index.html` para `dist/404.html`. Isso é **essencial**: sem esse arquivo, o host estático devolve 404 em links diretos como `/callback` e `/dashboard`, e o login do Spotify quebra.
-
 ### Passo a passo
 
 1. Suba o monorepo para um repositório no GitHub.
-2. No dashboard da Square Cloud, crie o app do **backend** conectando o repositório e apontando para a pasta `backend`.
-3. Configure as variáveis de ambiente do backend no dashboard. Use a URL final do frontend em `FRONTEND_URL`.
-4. Crie o app do **frontend** apontando para a pasta `frontend`, com `VITE_API_URL` e `VITE_SPOTIFY_REDIRECT_URI`.
-5. Volte ao Spotify Developer Dashboard e adicione a redirect URI de produção (`https://<seu-subdominio>/callback`).
-6. A cada `push` na branch `main`, o deploy acontece automaticamente.
+2. No dashboard da Square Cloud, crie o app conectando o repositório e apontando para a pasta `backend`.
+3. Cadastre as variáveis de ambiente na aba de variáveis (ou faça upload do seu `.env`). Os valores que mudam em produção:
+
+   | Variável | Valor em produção |
+   | --- | --- |
+   | `NODE_ENV` | `production` |
+   | `SPOTIFY_REDIRECT_URI` | `https://SEU-SITE.netlify.app/callback` |
+   | `FRONTEND_URL` | `https://SEU-SITE.netlify.app` |
+   | `SESSION_SECRET` | um valor novo, diferente do local |
+
+4. Anote a URL pública do app (ex.: `https://soundscape-api.squareweb.app`) — ela vai no `VITE_API_URL` do Netlify.
+
+---
+
+## Deploy do frontend no Netlify
+
+O `netlify.toml` na raiz já configura tudo o que o monorepo precisa:
+
+```toml
+[build]
+  base = "frontend"      # o build roda dentro da pasta do frontend
+  command = "npm run build"
+  publish = "dist"       # relativo ao base -> frontend/dist
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200           # roteamento de SPA
+```
+
+O redirect é **essencial**: sem ele, abrir `/callback` direto na URL devolve 404 e o login do Spotify quebra, porque é exatamente para lá que o Spotify redireciona.
+
+### Passo a passo
+
+1. No Netlify: **Add new site → Import an existing project** e escolha o repositório.
+2. Não precisa preencher build command nem publish directory — o `netlify.toml` já define os dois.
+3. Em **Site configuration → Environment variables**, cadastre:
+
+   | Variável | Valor |
+   | --- | --- |
+   | `VITE_API_URL` | URL do backend na Square Cloud, sem barra no final |
+   | `VITE_SPOTIFY_REDIRECT_URI` | `https://SEU-SITE.netlify.app/callback` |
+
+4. Faça o deploy e anote a URL final do site.
+5. Volte no `.env` do backend (e no dashboard da Square Cloud) e coloque essa URL em `FRONTEND_URL` e `SPOTIFY_REDIRECT_URI`.
+6. No Spotify Developer Dashboard, adicione `https://SEU-SITE.netlify.app/callback` em **Redirect URIs**.
+
+> As variáveis `VITE_*` são lidas no **momento do build**, não em runtime. Ao mudar qualquer uma delas, dispare um novo deploy (**Deploys → Trigger deploy → Clear cache and deploy site**).
+
+> **Deploy previews não funcionam para login.** Cada preview recebe uma URL própria (`deploy-preview-3--seu-site.netlify.app`), que não está registrada no Spotify nem liberada no CORS do backend. O OAuth só funciona na URL de produção — a menos que você adicione cada preview nos dois lugares.
 
 ---
 
 ## CI/CD com GitHub Actions
 
-Dois workflows em `.github/workflows/`, cada um disparando apenas quando a sua pasta muda:
+Um workflow em `.github/workflows/deploy-backend.yml`, disparado em `push` na `main` quando algo em `backend/**` muda (ou manualmente, via `workflow_dispatch`). Ele instala dependências, roda typecheck, compila e envia um zip (`dist`, `src`, `package.json`, `package-lock.json`, `tsconfig.json`, `squarecloud.app`) com `squarecloudofc/github-action@v2`.
 
-- **`deploy-backend.yml`** — `push` na `main` com mudanças em `backend/**`. Instala dependências, roda typecheck, compila e envia um zip (`dist`, `src`, `package.json`, `package-lock.json`, `tsconfig.json`, `squarecloud.app`) com `squarecloudofc/github-action@v2`.
-- **`deploy-frontend.yml`** — `push` na `main` com mudanças em `frontend/**`. Instala, builda com as variáveis `VITE_*` e envia o conteúdo de `dist` (já com `404.html` e o `squarecloud.app`).
-
-Ambos aceitam disparo manual (`workflow_dispatch`).
+O frontend não tem workflow: o Netlify observa o repositório e faz o build por conta própria.
 
 ### Secrets necessários
 
 Em **Settings → Secrets and variables → Actions → Repository secrets**:
 
-| Secret | Usado por | Onde encontrar |
-| --- | --- | --- |
-| `SQUARE_TOKEN` | ambos | Dashboard da Square Cloud → configurações da conta → API token |
-| `SQUARE_BACKEND_APP_ID` | backend | ID do app do backend na Square Cloud |
-| `SQUARE_FRONTEND_APP_ID` | frontend | ID do app do frontend na Square Cloud |
-| `VITE_API_URL` | frontend | URL pública do backend (ex.: `https://soundscape-api.squareweb.app`) |
-| `VITE_SPOTIFY_REDIRECT_URI` | frontend | `https://<subdominio-do-frontend>/callback` |
+| Secret | Onde encontrar |
+| --- | --- |
+| `SQUARE_TOKEN` | Dashboard da Square Cloud → configurações da conta → API token |
+| `SQUARE_BACKEND_APP_ID` | ID do app do backend na Square Cloud |
 
-As duas variáveis `VITE_*` são secrets porque o build acontece no runner do GitHub — o Vite precisa delas no momento da compilação para embuti-las no bundle.
+As variáveis do frontend não são secrets do GitHub — ficam no painel do Netlify.
 
 ---
 
@@ -399,7 +422,13 @@ Seu app do Spotify não tem acesso a `/audio-features`. Veja a seção [Limitaç
 Aquela faixa não tem `preview_url` (varia por região e por licenciamento). O botão vira "Abrir no Spotify".
 
 **404 em `/callback` ou `/dashboard` em produção**
-Falta o `dist/404.html`. Rode `npm run build` na pasta `frontend` (o `postbuild` gera o arquivo) e confirme que ele foi enviado no deploy.
+O `netlify.toml` não foi aplicado. Confirme que o arquivo está na **raiz** do repositório (não dentro de `frontend/`) e que o deploy mais recente o incluiu. A regra que resolve isso é o redirect `/*` → `/index.html` com status 200. Como reserva, o build também gera um `dist/404.html`.
+
+**Netlify falha com "vite: not found" ou "tsc: not found"**
+O build precisa das `devDependencies`. O `netlify.toml` já força isso com `NPM_FLAGS = "--include=dev"`. Se você sobrescreveu as configurações de build no painel do Netlify, elas têm prioridade sobre o arquivo — limpe os campos lá para o `netlify.toml` voltar a valer.
+
+**Mudei `VITE_API_URL` no Netlify e nada aconteceu**
+Variáveis `VITE_*` entram no bundle durante o build. Rode **Deploys → Trigger deploy → Clear cache and deploy site**.
 
 **Card exportado sem as capas dos álbuns**
 O html2canvas precisa que as imagens tenham sido carregadas com permissão de CORS. Recarregue a página antes de exportar. As imagens do CDN do Spotify (`i.scdn.co`) liberam CORS, então funciona no caso normal.
