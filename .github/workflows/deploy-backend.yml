@@ -54,12 +54,14 @@ jobs:
           echo "Secrets presentes."
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          # 24 para bater com o VERSION=recommended da Square Cloud (24.15.0):
+          # compilar e rodar na mesma major evita surpresa entre CI e producao.
+          node-version: 24
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
