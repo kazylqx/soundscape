@@ -63,9 +63,19 @@ const LIMITS = {
   artistDetails: 350,
   /**
    * Teto quando o endpoint em lote esta bloqueado e cada artista custa uma
-   * requisicao. Mais baixo de proposito, para nao estourar o rate limit.
+   * requisicao propria.
+   *
+   * 50 e um equilibrio deliberado: os artistas do top e os seguidos ja vem com
+   * genero de graca, e os que faltam entram por ordem de frequencia nas faixas.
+   * O artista que aparece em uma unica musica quase nao muda os graficos, mas
+   * custa o mesmo que o principal — e foi tentar buscar 160 de uma vez que
+   * derrubou tudo em 429.
    */
-  artistDetailsIndividual: 160,
+  artistDetailsIndividual: 50,
+  /** Requisicoes simultaneas no modo individual (mais conservador). */
+  artistDetailsConcurrency: 2,
+  /** Pausa entre as rodadas do modo individual. */
+  artistDetailsSpacingMs: 120,
 } as const;
 
 const BATCH = {
@@ -135,6 +145,32 @@ function retryDelay(attempt: number, retryAfterHeader?: string): number {
   return Math.min(base + Math.random() * 300, 15_000);
 }
 
+/* ============================================================
+ * Freio compartilhado de rate limit
+ * ============================================================ */
+
+/**
+ * Epoch (ms) ate quando nenhuma requisicao nova deve sair.
+ *
+ * Sem esse freio global, cada requisicao descobria o 429 por conta propria e
+ * dormia sozinha: dezenas de chamadas batiam juntas, tomavam 429 juntas e
+ * acordavam juntas, repetindo a avalanche. Com o valor compartilhado, o
+ * primeiro 429 ja segura toda a fila.
+ */
+let rateLimitedUntil = 0;
+
+/** Espera o fim do periodo de punicao, se houver. */
+async function respectRateLimit(): Promise<void> {
+  const wait = rateLimitedUntil - Date.now();
+  if (wait > 0) await sleep(wait);
+}
+
+/** Registra o periodo de espera pedido pelo Spotify (header Retry-After). */
+function noteRateLimit(waitMs: number): void {
+  const until = Date.now() + waitMs;
+  if (until > rateLimitedUntil) rateLimitedUntil = until;
+}
+
 /**
  * Executa uma chamada autenticada na Spotify API com retry e backoff.
  * O sleep do backoff acontece FORA do slot de concorrencia, para nao
@@ -145,6 +181,9 @@ async function spotifyRequest<T>(session: Session, path: string, options: Reques
   let refreshedOnce = false;
 
   for (let attempt = 0; attempt <= LIMITS.maxRetries; attempt += 1) {
+    // Respeita a punicao coletiva antes de ocupar um slot.
+    await respectRateLimit();
+
     try {
       return await withSlot(async () => {
         const accessToken = await getValidAccessToken(session);
@@ -195,13 +234,30 @@ async function spotifyRequest<T>(session: Session, path: string, options: Reques
       if (retryable && attempt < LIMITS.maxRetries) {
         const retryAfter = axiosError.response?.headers?.['retry-after'];
         const wait = retryDelay(attempt, typeof retryAfter === 'string' ? retryAfter : undefined);
-        logger.warn('Spotify: rate limit ou erro transitorio, aguardando para tentar de novo', {
-          path,
-          status: status ?? 'network',
-          attempt: attempt + 1,
-          waitMs: wait,
-          optional: Boolean(optional),
-        });
+
+        // 429 vale para a conta inteira, nao so para esta chamada: segura a fila.
+        if (status === 429) {
+          const jaEstavaFreado = rateLimitedUntil > Date.now();
+          noteRateLimit(wait);
+
+          // Só loga o primeiro da rajada — antes eram dezenas de linhas iguais.
+          if (!jaEstavaFreado) {
+            logger.warn('Spotify aplicou rate limit — pausando as requisicoes', {
+              path,
+              waitMs: wait,
+              attempt: attempt + 1,
+            });
+          }
+        } else {
+          logger.warn('Spotify: erro transitorio, aguardando para tentar de novo', {
+            path,
+            status: status ?? 'network',
+            attempt: attempt + 1,
+            waitMs: wait,
+            optional: Boolean(optional),
+          });
+        }
+
         await sleep(wait);
         continue;
       }
@@ -655,27 +711,42 @@ async function getArtistDetails(
   }
 
   if (batchBlocked) {
-    const pending = missing
-      .filter((id) => !details[id])
-      .slice(0, LIMITS.artistDetailsIndividual);
+    // `missing` chega ordenado por frequencia nas faixas: os primeiros sao os
+    // que mais influenciam generos, graficos e analise de playlist.
+    const pending = missing.filter((id) => !details[id]).slice(0, LIMITS.artistDetailsIndividual);
 
-    logger.warn('Endpoint em lote /artists bloqueado — buscando artistas individualmente', {
+    logger.warn('Endpoint em lote /artists bloqueado — buscando os principais individualmente', {
       pendentes: pending.length,
-      teto: LIMITS.artistDetailsIndividual,
+      ignorados: Math.max(0, missing.length - pending.length),
+      concorrencia: LIMITS.artistDetailsConcurrency,
     });
 
-    const fetched = await Promise.all(pending.map((id) => getArtistById(session, id)));
-
     let recovered = 0;
-    for (const artist of fetched) {
-      if (!artist) continue;
-      details[artist.id] = artist;
-      recovered += 1;
+
+    // Em rodadas pequenas e espacadas: 50 chamadas de uma vez viram 429.
+    for (let index = 0; index < pending.length; index += LIMITS.artistDetailsConcurrency) {
+      const round = pending.slice(index, index + LIMITS.artistDetailsConcurrency);
+      const fetched = await Promise.all(round.map((id) => getArtistById(session, id)));
+
+      for (const artist of fetched) {
+        if (!artist) continue;
+        details[artist.id] = artist;
+        recovered += 1;
+      }
+
+      if (index + LIMITS.artistDetailsConcurrency < pending.length) {
+        await sleep(LIMITS.artistDetailsSpacingMs);
+      }
     }
+
+    logger.info('Artistas recuperados individualmente', {
+      recuperados: recovered,
+      tentados: pending.length,
+    });
 
     if (recovered < pending.length) {
       warnings.push(
-        `detalhes de artistas: ${recovered} de ${pending.length} artistas recuperados individualmente (o endpoint em lote /artists nao esta liberado para este app).`,
+        `detalhes de artistas: ${recovered} de ${pending.length} artistas recuperados (o endpoint em lote /artists nao esta liberado para este app).`,
       );
     }
   }
@@ -826,9 +897,24 @@ export async function buildSnapshot(session: Session): Promise<MusicSnapshot> {
     if (!knownArtists[artist.id]) knownArtists[artist.id] = artist;
   }
 
+  /**
+   * Ordena os artistas por quantas faixas eles assinam. Quando cada artista
+   * custa uma requisicao, buscar primeiro quem aparece em 20 musicas rende
+   * muito mais que quem aparece em uma.
+   */
+  const artistFrequency = new Map<string, number>();
+  for (const track of allTracks) {
+    for (const id of track.artistIds) {
+      artistFrequency.set(id, (artistFrequency.get(id) ?? 0) + 1);
+    }
+  }
+  const artistIdsByRelevance = [...artistIds].sort(
+    (a, b) => (artistFrequency.get(b) ?? 0) - (artistFrequency.get(a) ?? 0),
+  );
+
   const [{ features, unavailable }, fetchedArtists] = await Promise.all([
     getAudioFeatures(session, trackIds, warnings),
-    getArtistDetails(session, artistIds, knownArtists, warnings),
+    getArtistDetails(session, artistIdsByRelevance, knownArtists, warnings),
   ]);
 
   const artistDetails: Record<string, ArtistLite> = { ...knownArtists, ...fetchedArtists };
