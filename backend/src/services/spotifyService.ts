@@ -61,6 +61,11 @@ const LIMITS = {
   audioFeatureTracks: 900,
   /** Teto de artistas detalhados. */
   artistDetails: 350,
+  /**
+   * Teto quando o endpoint em lote esta bloqueado e cada artista custa uma
+   * requisicao. Mais baixo de proposito, para nao estourar o rate limit.
+   */
+  artistDetailsIndividual: 160,
 } as const;
 
 const BATCH = {
@@ -588,30 +593,90 @@ async function getAudioFeatures(
   return { features, unavailable };
 }
 
-/** Detalhes de artistas em lotes de 50 IDs. */
+/** Um artista por requisicao — plano B quando o endpoint em lote esta bloqueado. */
+async function getArtistById(session: Session, artistId: string): Promise<ArtistLite | null> {
+  try {
+    const artist = await spotifyRequest<SpotifyArtist>(session, `/artists/${artistId}`, {
+      optional: true,
+    });
+    return artist && artist.id ? toArtistLite(artist) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Detalhes de artistas (genero, imagem, popularidade).
+ *
+ * O endpoint em lote `GET /artists` foi removido para apps em Development Mode
+ * (mudanca de fevereiro de 2026) e responde 403. Quando isso acontece caimos
+ * para `GET /artists/{id}`, uma requisicao por artista, com teto proprio para
+ * nao estourar o rate limit.
+ *
+ * `known` traz os artistas que ja vieram completos de /me/top/artists e
+ * /me/following — esses nao precisam de nenhuma requisicao extra.
+ */
 async function getArtistDetails(
   session: Session,
   artistIds: string[],
+  known: Record<string, ArtistLite>,
   warnings: string[],
 ): Promise<Record<string, ArtistLite>> {
   const details: Record<string, ArtistLite> = {};
-  const ids = artistIds.slice(0, LIMITS.artistDetails);
+  const missing = artistIds.filter((id) => id && !known[id]).slice(0, LIMITS.artistDetails);
 
-  for (let index = 0; index < ids.length; index += BATCH.artists) {
-    const chunk = ids.slice(index, index + BATCH.artists);
+  let batchBlocked = false;
+
+  for (let index = 0; index < missing.length; index += BATCH.artists) {
+    const chunk = missing.slice(index, index + BATCH.artists);
     if (chunk.length === 0) continue;
 
-    const data = await optionalRequest<{ artists: Array<SpotifyArtist | null> }>(
-      session,
-      '/artists',
-      { artists: [] },
-      warnings,
-      'detalhes de artistas',
-      { params: { ids: chunk.join(',') } },
-    );
+    try {
+      const data = await spotifyRequest<{ artists: Array<SpotifyArtist | null> }>(
+        session,
+        '/artists',
+        { params: { ids: chunk.join(',') }, optional: true },
+      );
 
-    for (const artist of data.artists || []) {
-      if (artist && artist.id) details[artist.id] = toArtistLite(artist);
+      for (const artist of data.artists || []) {
+        if (artist && artist.id) details[artist.id] = toArtistLite(artist);
+      }
+    } catch (error) {
+      if (error instanceof AppError && error.status === 401) throw error;
+
+      if (error instanceof AppError && error.status === 403) {
+        batchBlocked = true;
+        break;
+      }
+
+      const message = error instanceof AppError ? error.message : 'falha parcial';
+      warnings.push(`detalhes de artistas: ${message}`);
+    }
+  }
+
+  if (batchBlocked) {
+    const pending = missing
+      .filter((id) => !details[id])
+      .slice(0, LIMITS.artistDetailsIndividual);
+
+    logger.warn('Endpoint em lote /artists bloqueado — buscando artistas individualmente', {
+      pendentes: pending.length,
+      teto: LIMITS.artistDetailsIndividual,
+    });
+
+    const fetched = await Promise.all(pending.map((id) => getArtistById(session, id)));
+
+    let recovered = 0;
+    for (const artist of fetched) {
+      if (!artist) continue;
+      details[artist.id] = artist;
+      recovered += 1;
+    }
+
+    if (recovered < pending.length) {
+      warnings.push(
+        `detalhes de artistas: ${recovered} de ${pending.length} artistas recuperados individualmente (o endpoint em lote /artists nao esta liberado para este app).`,
+      );
     }
   }
 
@@ -745,20 +810,28 @@ export async function buildSnapshot(session: Session): Promise<MusicSnapshot> {
 
   /* ---------- fase derivada ---------- */
 
-  const [{ features, unavailable }, artistDetails] = await Promise.all([
-    getAudioFeatures(session, trackIds, warnings),
-    getArtistDetails(session, artistIds, warnings),
-  ]);
-
-  // Artistas que ja vieram completos das listas de top/followed entram no mapa tambem.
+  /**
+   * /me/top/artists e /me/following ja devolvem o artista completo (com
+   * generos). Montamos esse mapa primeiro para nao gastar requisicao com quem
+   * ja conhecemos — importante porque, sem o endpoint em lote, cada artista
+   * restante custa uma chamada.
+   */
+  const knownArtists: Record<string, ArtistLite> = {};
   for (const artist of [
     ...topArtists.short_term,
     ...topArtists.medium_term,
     ...topArtists.long_term,
     ...followedArtists,
   ]) {
-    if (!artistDetails[artist.id]) artistDetails[artist.id] = artist;
+    if (!knownArtists[artist.id]) knownArtists[artist.id] = artist;
   }
+
+  const [{ features, unavailable }, fetchedArtists] = await Promise.all([
+    getAudioFeatures(session, trackIds, warnings),
+    getArtistDetails(session, artistIds, knownArtists, warnings),
+  ]);
+
+  const artistDetails: Record<string, ArtistLite> = { ...knownArtists, ...fetchedArtists };
 
   /**
    * Quando /audio-features nao esta liberado para o app, estimamos os valores
@@ -774,7 +847,25 @@ export async function buildSnapshot(session: Session): Promise<MusicSnapshot> {
       seenForEstimate.add(track.id);
       uniqueTracks.push(track);
     }
-    audioFeatures = estimateFeaturesForTracks(uniqueTracks, artistDetails);
+
+    // Generos mais frequentes entre os top artists: base para as faixas
+    // cujos artistas nao conseguimos detalhar.
+    const genreTally = new Map<string, number>();
+    for (const artist of [
+      ...topArtists.short_term,
+      ...topArtists.medium_term,
+      ...topArtists.long_term,
+    ]) {
+      for (const genre of artist.genres) {
+        genreTally.set(genre, (genreTally.get(genre) ?? 0) + 1);
+      }
+    }
+    const dominantGenres = [...genreTally.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([genre]) => genre);
+
+    audioFeatures = estimateFeaturesForTracks(uniqueTracks, artistDetails, dominantGenres);
   }
 
   const meta: SnapshotMeta = {
@@ -847,4 +938,35 @@ export async function refreshNowPlaying(session: Session): Promise<MusicSnapshot
   if (session.snapshot) session.snapshot.currentlyPlaying = current;
 
   return current;
+}
+
+/**
+ * Busca artistas por genero — base da descoberta quando a IA nao esta
+ * disponivel (o endpoint /recommendations do Spotify foi descontinuado).
+ *
+ * O limite maximo do /search caiu para 10 na revisao de fevereiro de 2026,
+ * por isso o valor e travado nesse teto.
+ */
+export async function searchArtistsByGenre(
+  session: Session,
+  genre: string,
+  limit = 10,
+): Promise<ArtistLite[]> {
+  const term = genre.trim();
+  if (term.length < 2) return [];
+
+  try {
+    const data = await spotifyRequest<{ artists: SpotifyPaging<SpotifyArtist> }>(session, '/search', {
+      params: {
+        q: `genre:"${term}"`,
+        type: 'artist',
+        limit: Math.min(Math.max(1, limit), 10),
+      },
+      optional: true,
+    });
+
+    return (data.artists?.items || []).filter(Boolean).map(toArtistLite);
+  } catch {
+    return [];
+  }
 }

@@ -2,7 +2,7 @@ import axios, { AxiosError } from 'axios';
 import { env } from '../utils/env';
 import { logger } from '../utils/logger';
 import { AppError, upstreamError } from '../utils/errors';
-import { getArtistTopTrack, searchArtist } from './spotifyService';
+import { getArtistTopTrack, searchArtist, searchArtistsByGenre } from './spotifyService';
 import type {
   AIProfile,
   AIRecommendation,
@@ -189,11 +189,34 @@ Responda apenas com o JSON.`;
  * ============================================================ */
 
 interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string } }>;
-  usage?: { total_tokens?: number };
+  choices?: Array<{
+    message?: { content?: string };
+    /** "stop" = completou; "length" = cortada pelo teto de tokens. */
+    finish_reason?: string;
+  }>;
+  usage?: { total_tokens?: number; completion_tokens?: number };
 }
 
-async function callProvider(userPrompt: string): Promise<string> {
+/**
+ * Teto de tokens da resposta.
+ *
+ * Generoso de proposito: modelos com "thinking" (Gemini 2.5+/3.x, o-series)
+ * descontam o raciocinio desse mesmo orcamento. Com um teto apertado a
+ * resposta chega truncada no meio do JSON e o parse falha — foi exatamente o
+ * que acontecia com 2600.
+ */
+const MAX_OUTPUT_TOKENS = 8192;
+
+interface ProviderOptions {
+  /**
+   * Alguns providers compativeis com a API da OpenAI rejeitam (ou ignoram)
+   * `response_format`. Na segunda tentativa mandamos sem ele.
+   */
+  useResponseFormat?: boolean;
+}
+
+async function callProvider(userPrompt: string, options: ProviderOptions = {}): Promise<string> {
+  const { useResponseFormat = true } = options;
   const url = `${env.ai.baseUrl}/chat/completions`;
 
   try {
@@ -202,8 +225,8 @@ async function callProvider(userPrompt: string): Promise<string> {
       {
         model: env.ai.model,
         temperature: 0.85,
-        max_tokens: 2600,
-        response_format: { type: 'json_object' },
+        max_tokens: MAX_OUTPUT_TOKENS,
+        ...(useResponseFormat ? { response_format: { type: 'json_object' } } : {}),
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: userPrompt },
@@ -218,10 +241,34 @@ async function callProvider(userPrompt: string): Promise<string> {
       },
     );
 
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) throw upstreamError('A IA respondeu sem conteudo.', 'AI_EMPTY_RESPONSE');
+    const choice = data.choices?.[0];
+    const content = choice?.message?.content;
 
-    logger.debug('IA respondeu', { model: env.ai.model, tokens: data.usage?.total_tokens ?? null });
+    if (!content) {
+      logger.error('IA respondeu sem conteudo', {
+        model: env.ai.model,
+        finishReason: choice?.finish_reason ?? null,
+        usage: data.usage ?? null,
+      });
+      throw upstreamError('A IA respondeu sem conteudo.', 'AI_EMPTY_RESPONSE');
+    }
+
+    // finish_reason "length" = resposta cortada pelo teto de tokens.
+    if (choice?.finish_reason === 'length') {
+      logger.warn('Resposta da IA truncada pelo limite de tokens', {
+        model: env.ai.model,
+        maxTokens: MAX_OUTPUT_TOKENS,
+        usage: data.usage ?? null,
+      });
+    }
+
+    logger.debug('IA respondeu', {
+      model: env.ai.model,
+      tokens: data.usage?.total_tokens ?? null,
+      finishReason: choice?.finish_reason ?? null,
+      chars: content.length,
+    });
+
     return content;
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -249,26 +296,137 @@ async function callProvider(userPrompt: string): Promise<string> {
  * Parsing e normalizacao
  * ============================================================ */
 
-/** Extrai o objeto JSON mesmo se o modelo teimar em embrulhar em markdown. */
-function extractJson(raw: string): unknown {
-  const cleaned = raw
-    .trim()
-    .replace(/^```(?:json)?/i, '')
-    .replace(/```$/, '')
-    .trim();
+/**
+ * Descarta cercas de markdown e qualquer texto antes/depois do objeto.
+ *
+ * O corte do final e feito por balanceamento, nao pelo ultimo `}` encontrado:
+ * numa resposta truncada o ultimo `}` costuma ser de um objeto ANINHADO, e
+ * cortar ali jogaria fora itens validos que vieram depois dele.
+ */
+function isolateJsonObject(raw: string): string {
+  let text = raw.trim();
+
+  // O modelo as vezes escreve uma frase antes de abrir a cerca de codigo.
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence?.[1]) text = fence[1].trim();
+
+  const start = text.indexOf('{');
+  if (start > 0) text = text.slice(start);
+
+  // Procura o ponto onde o objeto raiz fecha. Se existir, o que vem depois e
+  // prosa do modelo e pode ir embora. Se nao existir, a resposta esta
+  // truncada — devolvemos tudo para o reparo aproveitar o maximo possivel.
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (char === '{' || char === '[') depth += 1;
+    else if (char === '}' || char === ']') {
+      depth -= 1;
+      if (depth === 0) return text.slice(0, index + 1).trim();
+    }
+  }
+
+  return text.trim();
+}
+
+/**
+ * Fecha strings, arrays e objetos deixados abertos por uma resposta truncada.
+ *
+ * Recuperar um JSON parcial (com os campos que chegaram) e melhor que jogar a
+ * analise inteira no lixo: o `normalizeProfile` preenche o que faltar com o
+ * perfil deterministico.
+ */
+export function repairTruncatedJson(text: string): string {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (const char of text) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (char === '{' || char === '[') stack.push(char);
+    else if (char === '}' || char === ']') stack.pop();
+  }
+
+  let repaired = text;
+
+  // 1. fecha a string aberta no ponto do corte
+  if (inString) repaired += '"';
+
+  // 2. remove lixo pendente no fim: virgula solta ou chave sem valor
+  repaired = repaired
+    .replace(/,\s*$/, '')
+    .replace(/"[^"]*"\s*:\s*$/, '')
+    .replace(/,\s*$/, '');
+
+  // 3. fecha os containers que continuam abertos
+  while (stack.length > 0) {
+    repaired += stack.pop() === '{' ? '}' : ']';
+  }
+
+  return repaired;
+}
+
+/** Extrai o objeto JSON da resposta, reparando truncamento quando preciso. */
+export function extractJson(raw: string): unknown {
+  const isolated = isolateJsonObject(raw);
 
   try {
-    return JSON.parse(cleaned);
+    return JSON.parse(isolated);
   } catch {
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(cleaned.slice(start, end + 1));
-      } catch {
-        /* cai no throw abaixo */
-      }
-    }
+    /* tenta reparar abaixo */
+  }
+
+  try {
+    const repaired = repairTruncatedJson(isolated);
+    const parsed = JSON.parse(repaired);
+
+    logger.warn('JSON da IA estava truncado e foi reparado', {
+      charsRecebidos: isolated.length,
+      charsReparados: repaired.length,
+    });
+
+    return parsed;
+  } catch {
+    // Sem o trecho bruto e impossivel saber se foi truncamento, markdown ou
+    // o modelo simplesmente ignorando a instrucao.
+    logger.error('A IA nao devolveu JSON valido', {
+      model: env.ai.model,
+      chars: raw.length,
+      inicio: raw.slice(0, 300),
+      fim: raw.slice(-200),
+    });
+
     throw upstreamError('A IA nao devolveu JSON valido.', 'AI_INVALID_JSON');
   }
 }
@@ -381,11 +539,121 @@ function periodLabel(hour: number | null): string {
   return 'a noite';
 }
 
+/** Todos os artistas que o usuario ja conhece — por id e por nome. */
+function buildKnownArtists(snapshot: MusicSnapshot): { ids: Set<string>; names: Set<string> } {
+  const ids = new Set<string>();
+  const names = new Set<string>();
+
+  const add = (id: string | undefined, name: string | undefined) => {
+    if (id) ids.add(id);
+    if (name) names.add(name.trim().toLowerCase());
+  };
+
+  for (const artist of [
+    ...snapshot.topArtists.short_term,
+    ...snapshot.topArtists.medium_term,
+    ...snapshot.topArtists.long_term,
+    ...snapshot.followedArtists,
+  ]) {
+    add(artist.id, artist.name);
+  }
+
+  for (const artist of Object.values(snapshot.artistDetails)) add(artist.id, artist.name);
+
+  // Artistas das faixas, mesmo sem detalhe carregado.
+  const tracks = [
+    ...snapshot.topTracks.short_term,
+    ...snapshot.topTracks.medium_term,
+    ...snapshot.topTracks.long_term,
+    ...snapshot.savedTracks,
+    ...snapshot.recentlyPlayed.map((entry) => entry.track),
+    ...snapshot.playlists.flatMap((playlist) => playlist.tracks),
+  ];
+  for (const track of tracks) {
+    track.artistIds.forEach((id) => ids.add(id));
+    track.artistNames.forEach((name) => names.add(name.trim().toLowerCase()));
+  }
+
+  return { ids, names };
+}
+
 /**
- * Recomendacoes sem IA: artistas que orbitam o gosto do usuario
- * (seguidos ou presentes nas playlists) mas que nao estao no top.
+ * Descoberta de artistas sem IA.
+ *
+ * O endpoint /recommendations do Spotify foi descontinuado, entao buscamos por
+ * genero (`genre:"..."`) nos generos que mais aparecem no perfil e filtramos
+ * tudo o que o usuario ja escuta. O resultado sao artistas genuinamente novos,
+ * e nao uma releitura da propria biblioteca.
  */
-function fallbackRecommendations(snapshot: MusicSnapshot): AIRecommendation[] {
+async function discoverRecommendations(
+  session: Session,
+  snapshot: MusicSnapshot,
+  metrics: MusicMetrics,
+): Promise<AIRecommendation[]> {
+  const known = buildKnownArtists(snapshot);
+
+  const reference =
+    snapshot.topArtists.medium_term[0]?.name ||
+    snapshot.topArtists.long_term[0]?.name ||
+    'seus artistas favoritos';
+
+  const topGenres = metrics.genres.slice(0, 6);
+  const found: AIRecommendation[] = [];
+  const chosen = new Set<string>();
+
+  for (const entry of topGenres) {
+    if (found.length >= 10) break;
+
+    const artists = await searchArtistsByGenre(session, entry.genre, 10);
+
+    for (const artist of artists) {
+      if (found.length >= 10) break;
+
+      const nameKey = artist.name.trim().toLowerCase();
+      if (known.ids.has(artist.id) || known.names.has(nameKey) || chosen.has(artist.id)) continue;
+
+      chosen.add(artist.id);
+      found.push({
+        name: artist.name,
+        reason: `${formatGenreLabel(entry.genre)} representa ${entry.percentage.toFixed(1)}% do seu gosto, e este nome ainda nao aparece em nenhuma das suas listas.`,
+        similarTo: reference,
+        genre: artist.genres[0] ?? entry.genre,
+        energy: 'media',
+        spotify: {
+          id: artist.id,
+          imageUrl: artist.imageUrl,
+          spotifyUrl: artist.spotifyUrl,
+          genres: artist.genres,
+          popularity: artist.popularity,
+          previewUrl: null,
+          topTrackName: null,
+        },
+      });
+    }
+  }
+
+  if (found.length > 0) {
+    logger.info('Recomendacoes montadas por busca de genero', {
+      total: found.length,
+      generos: topGenres.length,
+    });
+    return found;
+  }
+
+  // Ultimo recurso: artistas que o usuario segue mas nao ouve.
+  return orbitRecommendations(snapshot, reference);
+}
+
+/** Deixa o genero apresentavel dentro da frase do motivo. */
+function formatGenreLabel(genre: string): string {
+  return genre.charAt(0).toUpperCase() + genre.slice(1);
+}
+
+/**
+ * Plano C: artistas que orbitam o gosto (seguidos ou em playlists) mas nao
+ * estao no top. Nao e descoberta de verdade, mas e melhor que uma lista vazia.
+ */
+function orbitRecommendations(snapshot: MusicSnapshot, reference: string): AIRecommendation[] {
   const topArtistIds = new Set(
     [
       ...snapshot.topArtists.short_term,
@@ -394,16 +662,15 @@ function fallbackRecommendations(snapshot: MusicSnapshot): AIRecommendation[] {
     ].map((artist) => artist.id),
   );
 
-  const reference =
-    snapshot.topArtists.medium_term[0]?.name ||
-    snapshot.topArtists.long_term[0]?.name ||
-    'seus artistas favoritos';
-
   const candidates = new Map<string, { name: string; genres: string[]; popularity: number }>();
 
   for (const artist of snapshot.followedArtists) {
     if (topArtistIds.has(artist.id)) continue;
-    candidates.set(artist.id, { name: artist.name, genres: artist.genres, popularity: artist.popularity });
+    candidates.set(artist.id, {
+      name: artist.name,
+      genres: artist.genres,
+      popularity: artist.popularity,
+    });
   }
 
   for (const playlist of snapshot.playlists) {
@@ -426,7 +693,8 @@ function fallbackRecommendations(snapshot: MusicSnapshot): AIRecommendation[] {
     .slice(0, 10)
     .map((candidate) => ({
       name: candidate.name,
-      reason: `Esta no seu universo (playlists ou artistas seguidos) mas ainda nao entrou no seu top — vale uma escuta dedicada.`,
+      reason:
+        'Esta no seu universo (playlists ou artistas seguidos) mas ainda nao entrou no seu top — vale uma escuta dedicada.',
       similarTo: reference,
       genre: candidate.genres[0],
       energy: 'media' as const,
@@ -490,7 +758,9 @@ export function buildFallbackProfile(snapshot: MusicSnapshot, metrics: MusicMetr
       metrics.evolution.newArtistsShortTerm.length > 0
         ? `Nas ultimas semanas entraram nomes como ${metrics.evolution.newArtistsShortTerm.slice(0, 3).join(', ')}, enquanto ${metrics.evolution.consistentArtists[0] || 'sua base'} continuou firme.`
         : 'Seu gosto esta em fase estavel: os mesmos nomes seguram o topo em todos os periodos.',
-    recommendations: fallbackRecommendations(snapshot),
+    // Preenchidas por `discoverRecommendations` no generateProfile, que tem
+    // acesso a sessao para consultar o Spotify.
+    recommendations: [],
     generatedAt: new Date().toISOString(),
     model: 'fallback-deterministico',
     fallback: true,
@@ -507,6 +777,10 @@ export async function enrichRecommendations(
 ): Promise<AIRecommendation[]> {
   return Promise.all(
     recommendations.map(async (recommendation) => {
+      // Recomendacoes vindas da busca por genero ja trazem os dados do
+      // Spotify: nao gastamos requisicao para procurar de novo.
+      if (recommendation.spotify?.id) return recommendation;
+
       const artist = await searchArtist(session, recommendation.name);
       if (!artist) return { ...recommendation, spotify: null };
 
@@ -536,6 +810,27 @@ export async function enrichRecommendations(
  * ============================================================ */
 
 /**
+ * Pede o JSON do perfil, com uma segunda tentativa sem `response_format`.
+ *
+ * Providers compativeis com a API da OpenAI (Gemini, Groq, OpenRouter) tratam
+ * `response_format` de formas diferentes — alguns ignoram, outros degradam a
+ * resposta. Quando o parse falha, vale tentar de novo sem ele antes de desistir.
+ */
+async function requestProfileJson(payload: PromptPayload): Promise<unknown> {
+  const prompt = buildUserPrompt(payload);
+
+  try {
+    return extractJson(await callProvider(prompt, { useResponseFormat: true }));
+  } catch (error) {
+    const code = error instanceof AppError ? error.code : '';
+    if (code !== 'AI_INVALID_JSON' && code !== 'AI_EMPTY_RESPONSE') throw error;
+
+    logger.warn('Tentando a IA novamente sem response_format', { code, model: env.ai.model });
+    return extractJson(await callProvider(prompt, { useResponseFormat: false }));
+  }
+}
+
+/**
  * Gera o perfil de IA a partir do snapshot + metricas.
  * Nunca lanca por falha da IA: cai para o perfil deterministico.
  */
@@ -545,29 +840,36 @@ export async function generateProfile(
   metrics: MusicMetrics,
 ): Promise<AIProfile> {
   const fallback = buildFallbackProfile(snapshot, metrics);
+  let profile: AIProfile = fallback;
 
   if (!env.ai.enabled) {
     logger.warn('IA desabilitada (sem AI_API_KEY) — usando perfil deterministico.');
-    return { ...fallback, recommendations: await enrichRecommendations(session, fallback.recommendations) };
+  } else {
+    try {
+      const payload = buildPromptPayload(snapshot, metrics);
+      profile = normalizeProfile(await requestProfileJson(payload), metrics, fallback);
+      logger.info('Perfil de IA gerado', {
+        sessionId: session.id,
+        model: env.ai.model,
+        recommendations: profile.recommendations.length,
+      });
+    } catch (error) {
+      const message = error instanceof AppError ? error.message : 'erro desconhecido';
+      logger.error('Analise de IA falhou — aplicando fallback', { message });
+      profile = fallback;
+    }
   }
 
-  let profile: AIProfile;
+  /**
+   * O perfil deterministico nasce sem recomendacoes: quem as monta e a busca
+   * por genero no Spotify. Isso tambem cobre o caso da IA responder sem a
+   * chave `recommendations`.
+   */
+  const recommendations =
+    profile.recommendations.length > 0
+      ? profile.recommendations
+      : await discoverRecommendations(session, snapshot, metrics);
 
-  try {
-    const payload = buildPromptPayload(snapshot, metrics);
-    const raw = await callProvider(buildUserPrompt(payload));
-    profile = normalizeProfile(extractJson(raw), metrics, fallback);
-    logger.info('Perfil de IA gerado', {
-      sessionId: session.id,
-      model: env.ai.model,
-      recommendations: profile.recommendations.length,
-    });
-  } catch (error) {
-    const message = error instanceof AppError ? error.message : 'erro desconhecido';
-    logger.error('Analise de IA falhou — aplicando fallback', { message });
-    profile = fallback;
-  }
-
-  const enriched = await enrichRecommendations(session, profile.recommendations);
+  const enriched = await enrichRecommendations(session, recommendations);
   return { ...profile, recommendations: enriched };
 }

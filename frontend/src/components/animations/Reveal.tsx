@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react';
-import { motion, type Variants } from 'framer-motion';
+import { useRef, type ReactNode } from 'react';
+import { motion, useInView, type Variants } from 'framer-motion';
 import { cn } from '@/components/ui/cn';
 
 /**
@@ -68,6 +68,18 @@ const itemVariants: Variants = {
   },
 };
 
+/**
+ * Container de entrada em cascata.
+ *
+ * Usa `useInView` + `animate` explicito em vez de `whileInView`. A diferenca
+ * importa: `whileInView` propaga a variante pelo estado do *gesto*, que nao
+ * alcanca filhos montados depois que o gesto ja terminou (com `once: true` o
+ * listener e removido). Em listas filtradas isso deixava os itens novos presos
+ * em `hidden` — renderizados no DOM, mas com opacity 0.
+ *
+ * Com `animate` controlado por estado, qualquer filho que monte depois herda
+ * "visible" normalmente.
+ */
 export function Stagger({
   children,
   className,
@@ -79,13 +91,16 @@ export function Stagger({
   once?: boolean;
   delay?: number;
 }): JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  const inView = useInView(ref, { once, margin: '-40px' });
+
   return (
     <motion.div
+      ref={ref}
       className={cn(className)}
       variants={containerVariants}
       initial="hidden"
-      whileInView="visible"
-      viewport={{ once, margin: '-40px' }}
+      animate={inView ? 'visible' : 'hidden'}
       transition={{ delayChildren: delay }}
     >
       {children}

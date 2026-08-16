@@ -153,14 +153,23 @@ function profileForGenres(genres: string[]): FeatureProfile {
 export function estimateFeaturesForTracks(
   tracks: TrackLite[],
   artistDetails: Record<string, ArtistLite>,
+  /**
+   * Generos dominantes do usuario. Servem de base para as faixas cujos
+   * artistas nao estao em `artistDetails` — sem isso elas caem todas no perfil
+   * neutro e os graficos ficam achatados, todos no centro da escala.
+   */
+  fallbackGenres: string[] = [],
 ): Record<string, AudioFeaturesLite> {
   const result: Record<string, AudioFeaturesLite> = {};
+
+  const fallbackProfile =
+    fallbackGenres.length > 0 ? profileForGenres(fallbackGenres) : NEUTRAL_PROFILE;
 
   for (const track of tracks) {
     if (!track.id || result[track.id]) continue;
 
     const genres = track.artistIds.flatMap((id) => artistDetails[id]?.genres ?? []);
-    const base = profileForGenres(genres);
+    const base = genres.length > 0 ? profileForGenres(genres) : fallbackProfile;
 
     // Variacao pseudo-aleatoria estavel em torno do perfil do genero.
     const wiggle = (salt: string, amplitude: number) => (hashUnit(track.id + salt) - 0.5) * 2 * amplitude;
@@ -173,9 +182,9 @@ export function estimateFeaturesForTracks(
 
     result[track.id] = {
       id: track.id,
-      danceability: round(clamp01(base.danceability + wiggle('d', 0.12) + popBias - longBias * 0.1)),
-      energy: round(clamp01(base.energy + wiggle('e', 0.12) - longBias * 0.08)),
-      valence: round(clamp01(base.valence + wiggle('v', 0.16) + popBias)),
+      danceability: round(clamp01(base.danceability + wiggle('d', 0.14) + popBias - longBias * 0.1)),
+      energy: round(clamp01(base.energy + wiggle('e', 0.16) - longBias * 0.08)),
+      valence: round(clamp01(base.valence + wiggle('v', 0.2) + popBias)),
       acousticness: round(clamp01(base.acousticness + wiggle('a', 0.14) + longBias * 0.05)),
       instrumentalness: round(clamp01(base.instrumentalness + wiggle('i', 0.12) + longBias * 0.15)),
       speechiness: round(clamp01(base.speechiness + wiggle('s', 0.04))),

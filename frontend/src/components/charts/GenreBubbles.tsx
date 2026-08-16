@@ -23,11 +23,32 @@ interface TreemapNodeProps {
   index?: number;
   name?: string;
   percentage?: number;
+  /** 0 = no raiz (a moldura do grafico), 1 = celula de genero. */
+  depth?: number;
 }
 
-/** Celula do treemap: cor por indice e rotulo apenas quando ha espaco. */
-function TreemapCell(props: TreemapNodeProps): JSX.Element {
-  const { x = 0, y = 0, width = 0, height = 0, index = 0, name = '', percentage = 0 } = props;
+/**
+ * Celula do treemap.
+ *
+ * O Recharts chama `content` para TODOS os nos, inclusive o raiz (depth 0),
+ * que ocupa a area inteira do grafico. Sem o guard abaixo o raiz desenhava um
+ * retangulo colorido por cima de tudo e o mapa de generos parecia quebrado.
+ */
+function TreemapCell(props: TreemapNodeProps): JSX.Element | null {
+  const {
+    x = 0,
+    y = 0,
+    width = 0,
+    height = 0,
+    index = 0,
+    name = '',
+    percentage = 0,
+    depth = 1,
+  } = props;
+
+  if (depth === 0) return null;
+  // Celulas degeneradas (area zero) tambem nao devem ser desenhadas.
+  if (width <= 0 || height <= 0) return null;
 
   const color = chartColor(index);
   const showLabel = width > 74 && height > 38;
