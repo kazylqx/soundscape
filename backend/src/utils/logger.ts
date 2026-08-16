@@ -8,7 +8,16 @@ type Level = 'debug' | 'info' | 'warn' | 'error';
 
 const LEVEL_WEIGHT: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
-const SENSITIVE_KEY = /(token|secret|password|authorization|client_secret|code|api_key|apikey)/i;
+/**
+ * Chaves cujo valor nunca deve aparecer no log.
+ *
+ * `code` sozinho ficou de fora de proposito: ele mascarava os codigos de erro
+ * da aplicacao (`code: 'SESSION_INVALID'` saia como `SESS…ALID`), justamente o
+ * dado mais util para diagnosticar. O `code` do OAuth nunca e logado — os
+ * padroes especificos abaixo cobrem o caso.
+ */
+const SENSITIVE_KEY =
+  /(token|secret|password|authorization|client_secret|authorization_code|auth_code|oauth_code|api_key|apikey|refresh)/i;
 
 function currentLevel(): Level {
   const raw = (process.env.LOG_LEVEL || 'info').toLowerCase();
