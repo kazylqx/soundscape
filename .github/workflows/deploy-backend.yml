@@ -6,11 +6,14 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/deploy-backend.yml'
+  # Permite disparar na mao pela aba Actions (util depois de criar os secrets).
   workflow_dispatch:
 
 concurrency:
   group: deploy-backend
-  cancel-in-progress: true
+  # false de proposito: cancelar um deploy no meio do upload pode deixar a
+  # aplicacao com arquivos pela metade.
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -18,6 +21,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Roda antes de tudo: sem os secrets o passo de deploy falharia com um
+      # erro obscuro do CLI, difícil de associar a configuracao faltando.
+      - name: Conferir secrets
+        env:
+          SQUARE_TOKEN: ${{ secrets.SQUARE_TOKEN }}
+          SQUARE_BACKEND_APP_ID: ${{ secrets.SQUARE_BACKEND_APP_ID }}
+        run: |
+          faltando=""
+          if [ -z "$SQUARE_TOKEN" ]; then faltando="$faltando SQUARE_TOKEN"; fi
+          if [ -z "$SQUARE_BACKEND_APP_ID" ]; then faltando="$faltando SQUARE_BACKEND_APP_ID"; fi
+
+          if [ -n "$faltando" ]; then
+            echo "::error title=Secrets ausentes::Faltando:$faltando"
+            {
+              echo "## Deploy nao executado"
+              echo ""
+              echo "Secrets ausentes:**$faltando**"
+              echo ""
+              echo "Configure em **Settings -> Secrets and variables -> Actions -> New repository secret**:"
+              echo ""
+              echo "| Secret | Onde encontrar |"
+              echo "| --- | --- |"
+              echo "| \`SQUARE_TOKEN\` | Dashboard da Square Cloud, configuracoes da conta, API token |"
+              echo "| \`SQUARE_BACKEND_APP_ID\` | ID do app do backend na Square Cloud (aparece na URL do app) |"
+              echo ""
+              echo "Depois de criar, rode este workflow de novo em **Actions -> Deploy Backend -> Run workflow**."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "Secrets presentes."
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -56,6 +91,19 @@ jobs:
             squarecloud.app \
             -x "*.map"
 
+      # Confere o que vai subir. Se o dist/app.js nao estiver no zip, a Square
+      # Cloud nao encontra o MAIN e a aplicacao nao inicia.
+      - name: Conferir o pacote
+        run: |
+          echo "Tamanho: $(du -h backend.zip | cut -f1)"
+          if unzip -l backend.zip | grep -q "dist/app.js"; then
+            echo "dist/app.js presente no zip."
+          else
+            echo "::error::dist/app.js nao esta no zip — o MAIN do squarecloud.app nao seria encontrado."
+            unzip -l backend.zip
+            exit 1
+          fi
+
       - name: Deploy na Square Cloud
         uses: squarecloudofc/github-action@v2
         with:
@@ -63,4 +111,12 @@ jobs:
           token: ${{ secrets.SQUARE_TOKEN }}
 
       - name: Resumo
-        run: echo "Backend enviado para a Square Cloud (app ${{ secrets.SQUARE_BACKEND_APP_ID }})." >> $GITHUB_STEP_SUMMARY
+        run: |
+          {
+            echo "## Backend enviado para a Square Cloud"
+            echo ""
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- A aplicacao foi reiniciada (\`--restart\`)."
+            echo ""
+            echo "Confirme nos logs da Square Cloud a linha \`Soundscape API online\` com \`port: 80\`."
+          } >> "$GITHUB_STEP_SUMMARY"
