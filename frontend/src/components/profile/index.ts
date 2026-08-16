@@ -1,0 +1,10 @@
+export { AICuriosities, type AICuriositiesProps } from './AICuriosities';
+export { ArtistCard, ArtistRow, type ArtistRowProps } from './ArtistRow';
+export { ErasSection, type ErasSectionProps } from './ErasSection';
+export { GenresSection, type GenresSectionProps } from './GenresSection';
+export { IdentitySection, type IdentitySectionProps } from './IdentitySection';
+export { PatternSection, type PatternSectionProps } from './PatternSection';
+export { ProfileHero, type ProfileHeroProps } from './ProfileHero';
+export { SonicAnalysis, type SonicAnalysisProps } from './SonicAnalysis';
+export { TopCharts, type TopChartsProps } from './TopCharts';
+export { TrackRow, type TrackRowProps } from './TrackRow';

@@ -1,0 +1,260 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   Tokens globais
+   As variaveis --vibe-* sao sobrescritas em runtime pelo useTheme
+   com as cores extraidas das capas dos albuns do usuario.
+   ============================================================ */
+
+@layer base {
+  :root {
+    --ink-950: #050506;
+    --ink-900: #0a0a0c;
+    --ink-800: #131317;
+    --ink-700: #1a1a20;
+
+    --chalk: #f4f4f5;
+    --chalk-muted: #8f8f9c;
+
+    --spotify: #1db954;
+    --spotify-bright: #1ed760;
+
+    /* Paleta padrao — substituida pela vibe do usuario. */
+    --vibe-primary: #1ed760;
+    --vibe-secondary: #8b5cf6;
+    --vibe-tertiary: #ec4899;
+
+    /* Altura da barra do mini-player + bottom bar no mobile. */
+    --player-height: 4.5rem;
+    --bottom-bar-height: 4.25rem;
+
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-ink-700;
+  }
+
+  html {
+    @apply bg-ink-950 antialiased;
+    -webkit-tap-highlight-color: transparent;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-ink-950 font-sans text-chalk;
+    /* Evita salto horizontal em animacoes que estouram a viewport. */
+    overflow-x: hidden;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-display font-bold tracking-tight;
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  /* Respeita quem pediu menos movimento no sistema operacional. */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* Foco visivel e consistente (acessibilidade). */
+  :focus-visible {
+    @apply outline-none ring-2 ring-spotify-bright ring-offset-2 ring-offset-ink-950;
+  }
+
+  /* Scrollbar discreta. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--ink-950);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a33;
+    border: 2px solid var(--ink-950);
+    border-radius: 999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a45;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--vibe-primary) 35%, transparent);
+    color: #fff;
+  }
+}
+
+/* ============================================================
+   Componentes utilitarios reaproveitados
+   ============================================================ */
+
+@layer components {
+  /* Vidro escuro usado nos cards e na navbar. */
+  .glass {
+    @apply border border-white/[0.06] bg-white/[0.03] backdrop-blur-xl;
+  }
+
+  .glass-strong {
+    @apply border border-white/10 bg-ink-900/80 backdrop-blur-2xl;
+  }
+
+  /* Texto com gradiente da vibe do usuario. */
+  .text-vibe {
+    background-image: linear-gradient(
+      110deg,
+      var(--vibe-primary) 0%,
+      var(--vibe-secondary) 55%,
+      var(--vibe-tertiary) 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .text-gradient-spotify {
+    background-image: linear-gradient(110deg, #1ed760 0%, #22d3ee 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Borda com gradiente (usa mask para nao pintar o interior). */
+  .border-vibe {
+    position: relative;
+  }
+
+  .border-vibe::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(135deg, var(--vibe-primary), var(--vibe-tertiary));
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* Halo suave atras de elementos de destaque. */
+  .halo {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .halo::after {
+    content: '';
+    position: absolute;
+    inset: -30%;
+    z-index: -1;
+    background: radial-gradient(
+      circle at 50% 40%,
+      color-mix(in srgb, var(--vibe-primary) 22%, transparent),
+      transparent 65%
+    );
+    pointer-events: none;
+  }
+
+  /* Espaco extra no fim das paginas para o mini-player e a bottom bar. */
+  .page-bottom-space {
+    padding-bottom: calc(var(--player-height) + var(--bottom-bar-height) + 2rem);
+  }
+
+  @media (min-width: 768px) {
+    .page-bottom-space {
+      padding-bottom: calc(var(--player-height) + 3rem);
+    }
+  }
+
+  /* Linha divisoria que some nas pontas. */
+  .rule {
+    height: 1px;
+    background: linear-gradient(
+      to right,
+      transparent,
+      rgb(255 255 255 / 0.12) 20%,
+      rgb(255 255 255 / 0.12) 80%,
+      transparent
+    );
+  }
+}
+
+@layer utilities {
+  /* Esconde a scrollbar mantendo o scroll (carrosseis horizontais). */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .scroll-snap-x {
+    scroll-snap-type: x mandatory;
+  }
+
+  .snap-start-safe {
+    scroll-snap-align: start;
+  }
+
+  /* Corta o texto em N linhas. */
+  .line-clamp-1,
+  .line-clamp-2,
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .line-clamp-1 {
+    -webkit-line-clamp: 1;
+  }
+
+  .line-clamp-2 {
+    -webkit-line-clamp: 2;
+  }
+
+  .line-clamp-3 {
+    -webkit-line-clamp: 3;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* html2canvas nao renderiza backdrop-filter: cards de export usam cores solidas. */
+  .export-safe {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}

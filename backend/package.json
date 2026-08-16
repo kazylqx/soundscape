@@ -1,0 +1,44 @@
+{
+  "name": "soundscape-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Soundscape API — Spotify OAuth proxy + AI music profile analysis",
+  "main": "dist/app.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/app.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/app.js",
+    "square:start": "npm run build && node dist/app.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "keywords": [
+    "spotify",
+    "music",
+    "ai",
+    "express",
+    "typescript"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "axios": "1.7.7",
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.21.1",
+    "express-rate-limit": "7.4.1",
+    "helmet": "8.0.0",
+    "@types/cors": "2.8.17",
+    "@types/express": "4.17.21",
+    "@types/node": "22.7.9",
+    "typescript": "5.6.3"
+  },
+  "devDependencies": {
+    "tsx": "4.19.1"
+  },
+  "comments": {
+    "typescript": "typescript e @types ficam em dependencies de proposito: o START do squarecloud.app compila o projeto no servidor (npm run square:start), e a Square Cloud pode instalar apenas as dependencies em producao."
+  }
+}
