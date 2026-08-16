@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { env } from '../utils/env';
 import { logger } from '../utils/logger';
-import { badRequest } from '../utils/errors';
+import { AppError, badRequest } from '../utils/errors';
 import { asyncHandler } from '../middleware/errorHandler';
 import { getSession, requireSession } from '../middleware/auth';
 import { authLimiter } from '../middleware/rateLimit';
@@ -97,6 +97,27 @@ router.post(
       });
     } catch (error) {
       destroySession(bootstrap.session.id);
+
+      /**
+       * A troca do code funcionou (a sessao foi criada), mas o Spotify negou a
+       * primeira leitura do perfil. Em Development Mode isso significa quase
+       * sempre a mesma coisa: a conta nao esta na lista de usuarios do app.
+       * Sem essa traducao o usuario ve apenas "Acesso negado", sem saber o que
+       * fazer — e nao ha nada que ELE possa fazer, e o dono do app que precisa
+       * cadastrar a conta.
+       */
+      if (error instanceof AppError && error.status === 403) {
+        logger.warn('Login negado pelo Spotify — conta provavelmente fora da lista do app', {
+          hint: 'Spotify Developer Dashboard > seu app > Settings > User Management',
+        });
+
+        throw new AppError(
+          403,
+          'SPOTIFY_USER_NOT_ALLOWED',
+          'Esta conta do Spotify nao esta autorizada neste app. Apps em modo de desenvolvimento aceitam no maximo 5 contas, e cada uma precisa ser cadastrada pelo dono do app no Spotify Developer Dashboard (Settings > User Management), com nome de exibicao e e-mail.',
+        );
+      }
+
       throw error;
     }
   }),

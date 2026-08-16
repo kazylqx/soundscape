@@ -409,6 +409,13 @@ A URI registrada no Spotify difere da usada pelo app. Os três valores precisam 
 **`STATE_INVALID` — "Requisição de login expirada ou inválida"**
 O `state` do OAuth é de uso único, expira em 10 minutos e vive na memória do backend. Isso acontece se o servidor reiniciou durante o login, se a página de callback foi recarregada ou se o link do callback foi reaproveitado. Volte à home e conecte novamente.
 
+**`SPOTIFY_USER_NOT_ALLOWED` — "Esta conta do Spotify nao esta autorizada neste app"**
+Acontece com qualquer pessoa que não seja você. Apps em **Development Mode** só aceitam contas cadastradas manualmente: `developer.spotify.com/dashboard` → seu app → **Settings → User Management** → adicione o **nome de exibição** e o **e-mail** da conta Spotify da pessoa.
+
+O limite é de **5 usuários** por app (regra de fevereiro de 2026). Isso afeta direto a página `/compare`: só contas cadastradas conseguem participar. Para ir além, é preciso solicitar *extended quota* no dashboard do Spotify.
+
+Sintoma no log: a sessão é criada e encerrada em seguida, com `403 SPOTIFY_FORBIDDEN` em `GET /me` — ou seja, a troca do código funcionou e a autorização da conta é que falhou.
+
 **`SPOTIFY_INVALID_CLIENT`**
 `SPOTIFY_CLIENT_ID` ou `SPOTIFY_CLIENT_SECRET` estão errados ou vazios. Confira o `.env` do backend e o dashboard da Square Cloud.
 

@@ -82,6 +82,12 @@ const LIMITS = {
    * parciais que um snapshot perfeito em 40s.
    */
   artistDetailsBudgetMs: 8_000,
+  /**
+   * Depois de tomar 429 no modo individual, quanto tempo esperar antes de
+   * tentar de novo. Sem isso, cada coleta gasta duas requisicoes fadadas ao
+   * erro que ainda acionam o freio global e atrasam o resto do fluxo.
+   */
+  artistDetailsCooldownMs: 15 * 60 * 1000,
 } as const;
 
 const BATCH = {
@@ -172,6 +178,16 @@ function retryDelay(attempt: number, retryAfterHeader?: string): number {
  * primeiro 429 ja segura toda a fila.
  */
 let rateLimitedUntil = 0;
+
+/**
+ * Ate quando o enriquecimento individual de artistas fica suspenso.
+ *
+ * Apps em Development Mode tem cota apertada, e a experiencia mostrou que essa
+ * fase costuma tomar 429 na primeira requisicao. Insistir a cada coleta gasta
+ * chamadas certas de falhar e, pior, liga o freio compartilhado — atrasando o
+ * que realmente importa, como a busca dos artistas recomendados.
+ */
+let individualArtistFetchBlockedUntil = 0;
 
 /** Espera o fim do periodo de punicao, se houver. */
 async function respectRateLimit(): Promise<void> {
@@ -741,6 +757,18 @@ async function getArtistDetails(
   }
 
   if (batchBlocked) {
+    // Tomou 429 recentemente: nem comeca, para nao religar o freio global.
+    if (individualArtistFetchBlockedUntil > Date.now()) {
+      const segundos = Math.ceil((individualArtistFetchBlockedUntil - Date.now()) / 1000);
+      logger.info('Enriquecimento individual de artistas suspenso apos rate limit', {
+        liberaEmSegundos: segundos,
+      });
+      warnings.push(
+        'detalhes de artistas: enriquecimento extra suspenso temporariamente por rate limit do Spotify. Os generos dos seus top artists e seguidos continuam completos.',
+      );
+      return details;
+    }
+
     // `missing` chega ordenado por frequencia nas faixas: os primeiros sao os
     // que mais influenciam generos, graficos e analise de playlist.
     const pending = missing.filter((id) => !details[id]).slice(0, LIMITS.artistDetailsIndividual);
@@ -761,6 +789,8 @@ async function getArtistDetails(
       // enriquecimento e dispensavel (top e seguidos ja trazem genero).
       if (rateLimitedUntil > Date.now()) {
         motivoParada = 'rate limit do Spotify';
+        // Segura as proximas coletas: a cota nao vai melhorar em segundos.
+        individualArtistFetchBlockedUntil = Date.now() + LIMITS.artistDetailsCooldownMs;
         break;
       }
       if (Date.now() > prazo) {
