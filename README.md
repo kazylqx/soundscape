@@ -149,7 +149,7 @@ Cada pasta tem um `.env` pronto para preencher e um `.env.example` como referên
 | Variável | Obrigatória | Descrição |
 | --- | :---: | --- |
 | `NODE_ENV` | — | `development` ou `production` |
-| `PORT` | — | Porta HTTP (padrão `3333`). Na Square Cloud é injetada automaticamente |
+| `PORT` | — | Porta HTTP. Deixe **em branco/comentada**: o código usa `3333` em desenvolvimento e `80` em produção (a Square Cloud exige a 80 para o subdomínio responder) |
 | `SPOTIFY_CLIENT_ID` | ✅ | Client ID do app do Spotify |
 | `SPOTIFY_CLIENT_SECRET` | ✅ | Client Secret — **nunca sai do servidor** |
 | `SPOTIFY_REDIRECT_URI` | ✅ | URL de callback do frontend, igual à registrada no Spotify |
@@ -318,9 +318,12 @@ AUTORESTART=true
    | Variável | Valor em produção |
    | --- | --- |
    | `NODE_ENV` | `production` |
+   | `PORT` | não defina (o código já usa `80`) — ou `80` explicitamente |
    | `SPOTIFY_REDIRECT_URI` | `https://SEU-SITE.netlify.app/callback` |
    | `FRONTEND_URL` | `https://SEU-SITE.netlify.app` |
    | `SESSION_SECRET` | um valor novo, diferente do local |
+
+   > A Square Cloud [exige que sites e APIs escutem na porta 80](https://docs.squarecloud.app/en/tutorials/how-to-deploy-your-website). Se a aplicação subir em outra porta, o subdomínio não responde — e o log não acusa erro nenhum, o que torna o problema difícil de achar. Por isso o padrão em produção é 80.
 
 4. Anote a URL pública do app (ex.: `https://soundscape-api.squareweb.app`) — ela vai no `VITE_API_URL` do Netlify.
 
@@ -438,6 +441,9 @@ As sessões vivem em memória: qualquer restart do backend (inclusive um deploy)
 
 **A análise de IA volta com `fallback: true`**
 `AI_API_KEY` não está configurada, a chave é inválida ou a chamada falhou. O perfil determinístico assume o lugar e o app segue funcionando. Confira os logs do backend.
+
+**O app subiu na Square Cloud mas o subdomínio não responde**
+A aplicação precisa escutar na **porta 80**. Confira nos logs a linha `Soundscape API online { port: ... }`. Se não for 80, garanta que `NODE_ENV=production` está definido (o padrão de produção é 80) ou defina `PORT=80` explicitamente.
 
 **`npm run build` do backend falha na Square Cloud**
 `typescript` e `@types/*` precisam estar em `dependencies` (já estão). Se você moveu para `devDependencies`, o `START` não encontra o compilador.

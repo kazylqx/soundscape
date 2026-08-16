@@ -49,7 +49,12 @@ const frontendUrls = (raw('FRONTEND_URL') || 'http://127.0.0.1:5173,http://local
 export const env = {
   nodeEnv,
   isProduction,
-  port: num('PORT', 3333),
+  /**
+   * Em producao o padrao e 80 porque a Square Cloud exige que sites e APIs
+   * escutem nessa porta para o subdominio responder. `PORT` continua tendo
+   * prioridade, entao outras hospedagens que injetam a porta seguem funcionando.
+   */
+  port: num('PORT', isProduction ? 80 : 3333),
 
   spotify: {
     clientId: spotifyClientId,
