@@ -76,6 +76,12 @@ const LIMITS = {
   artistDetailsConcurrency: 2,
   /** Pausa entre as rodadas do modo individual. */
   artistDetailsSpacingMs: 120,
+  /**
+   * Orcamento total do enriquecimento individual. Passado esse tempo a coleta
+   * segue com o que conseguiu: e melhor um snapshot completo em 5s com generos
+   * parciais que um snapshot perfeito em 40s.
+   */
+  artistDetailsBudgetMs: 8_000,
 } as const;
 
 const BATCH = {
@@ -134,6 +140,14 @@ const http: AxiosInstance = axios.create({
 interface RequestOptions extends AxiosRequestConfig {
   /** Marca a chamada como nao critica (apenas muda o nivel de log). */
   optional?: boolean;
+  /**
+   * Desliga o retry desta chamada.
+   *
+   * Usado no enriquecimento de artistas: sao dezenas de requisicoes
+   * dispensaveis, e esperar 30s de Retry-After em cada uma travaria a coleta
+   * inteira por algo que e apenas um extra.
+   */
+  noRetry?: boolean;
 }
 
 function retryDelay(attempt: number, retryAfterHeader?: string): number {
@@ -177,7 +191,7 @@ function noteRateLimit(waitMs: number): void {
  * bloquear as outras requisicoes da fila.
  */
 async function spotifyRequest<T>(session: Session, path: string, options: RequestOptions = {}): Promise<T> {
-  const { optional, ...config } = options;
+  const { optional, noRetry, ...config } = options;
   let refreshedOnce = false;
 
   for (let attempt = 0; attempt <= LIMITS.maxRetries; attempt += 1) {
@@ -231,7 +245,19 @@ async function spotifyRequest<T>(session: Session, path: string, options: Reques
 
       const retryable = status === 429 || status === undefined || (status >= 500 && status <= 599);
 
-      if (retryable && attempt < LIMITS.maxRetries) {
+      // Mesmo sem retry, o 429 precisa alimentar o freio compartilhado: as
+      // outras chamadas da fila devem recuar por causa desta.
+      if (status === 429 && noRetry) {
+        const retryAfter = axiosError.response?.headers?.['retry-after'];
+        noteRateLimit(retryDelay(0, typeof retryAfter === 'string' ? retryAfter : undefined));
+        throw new AppError(
+          429,
+          'SPOTIFY_RATE_LIMITED',
+          'O Spotify limitou as requisicoes. Tente novamente em instantes.',
+        );
+      }
+
+      if (retryable && !noRetry && attempt < LIMITS.maxRetries) {
         const retryAfter = axiosError.response?.headers?.['retry-after'];
         const wait = retryDelay(attempt, typeof retryAfter === 'string' ? retryAfter : undefined);
 
@@ -649,11 +675,15 @@ async function getAudioFeatures(
   return { features, unavailable };
 }
 
-/** Um artista por requisicao — plano B quando o endpoint em lote esta bloqueado. */
+/**
+ * Um artista por requisicao — plano B quando o endpoint em lote esta bloqueado.
+ * Sem retry de proposito: e um extra, nao vale segurar a coleta.
+ */
 async function getArtistById(session: Session, artistId: string): Promise<ArtistLite | null> {
   try {
     const artist = await spotifyRequest<SpotifyArtist>(session, `/artists/${artistId}`, {
       optional: true,
+      noRetry: true,
     });
     return artist && artist.id ? toArtistLite(artist) : null;
   } catch {
@@ -722,9 +752,22 @@ async function getArtistDetails(
     });
 
     let recovered = 0;
+    let motivoParada: string | null = null;
+    const prazo = Date.now() + LIMITS.artistDetailsBudgetMs;
 
     // Em rodadas pequenas e espacadas: 50 chamadas de uma vez viram 429.
     for (let index = 0; index < pending.length; index += LIMITS.artistDetailsConcurrency) {
+      // A conta ja esta de castigo: insistir so aprofunda a punicao, e este
+      // enriquecimento e dispensavel (top e seguidos ja trazem genero).
+      if (rateLimitedUntil > Date.now()) {
+        motivoParada = 'rate limit do Spotify';
+        break;
+      }
+      if (Date.now() > prazo) {
+        motivoParada = 'orcamento de tempo esgotado';
+        break;
+      }
+
       const round = pending.slice(index, index + LIMITS.artistDetailsConcurrency);
       const fetched = await Promise.all(round.map((id) => getArtistById(session, id)));
 
@@ -742,11 +785,12 @@ async function getArtistDetails(
     logger.info('Artistas recuperados individualmente', {
       recuperados: recovered,
       tentados: pending.length,
+      interrompido: motivoParada,
     });
 
-    if (recovered < pending.length) {
+    if (motivoParada) {
       warnings.push(
-        `detalhes de artistas: ${recovered} de ${pending.length} artistas recuperados (o endpoint em lote /artists nao esta liberado para este app).`,
+        `detalhes de artistas: ${recovered} de ${pending.length} recuperados antes de parar por ${motivoParada}. Os generos dos seus top artists e seguidos continuam completos; o resto usa seus generos dominantes como base.`,
       );
     }
   }
@@ -995,6 +1039,22 @@ export async function buildSnapshot(session: Session): Promise<MusicSnapshot> {
   };
 }
 
+type SnapshotResult = {
+  snapshot: MusicSnapshot;
+  metrics: ReturnType<typeof computeMetrics>;
+  cached: boolean;
+};
+
+/**
+ * Coletas em andamento, por sessao.
+ *
+ * Sem isso, dois pedidos concorrentes da mesma sessao (o usuario recarrega a
+ * pagina enquanto a primeira coleta ainda roda, duas telas montando juntas)
+ * disparavam duas coletas completas em paralelo — dobrando a carga na Spotify
+ * API justamente quando ela ja estava reclamando de rate limit.
+ */
+const snapshotInFlight = new Map<string, Promise<SnapshotResult>>();
+
 /**
  * Ponto de entrada usado pelas rotas: devolve o snapshot (do cache quando
  * possivel) junto das metricas derivadas.
@@ -1002,7 +1062,7 @@ export async function buildSnapshot(session: Session): Promise<MusicSnapshot> {
 export async function getSnapshotWithMetrics(
   session: Session,
   options: { force?: boolean } = {},
-): Promise<{ snapshot: MusicSnapshot; metrics: ReturnType<typeof computeMetrics>; cached: boolean }> {
+): Promise<SnapshotResult> {
   if (!options.force) {
     const cached = getCachedSnapshot(session);
     if (cached) {
@@ -1010,9 +1070,25 @@ export async function getSnapshotWithMetrics(
     }
   }
 
-  const snapshot = await buildSnapshot(session);
-  cacheSnapshot(session, snapshot);
-  return { snapshot, metrics: computeMetrics(snapshot), cached: false };
+  // Vale tambem para force: refazer a coleta em paralelo nao ajudaria ninguem.
+  const existing = snapshotInFlight.get(session.id);
+  if (existing) {
+    logger.debug('Coleta ja em andamento — aguardando a que esta rodando', {
+      sessionId: session.id,
+    });
+    return existing;
+  }
+
+  const task = (async (): Promise<SnapshotResult> => {
+    const snapshot = await buildSnapshot(session);
+    cacheSnapshot(session, snapshot);
+    return { snapshot, metrics: computeMetrics(snapshot), cached: false };
+  })().finally(() => {
+    snapshotInFlight.delete(session.id);
+  });
+
+  snapshotInFlight.set(session.id, task);
+  return task;
 }
 
 /** Atualiza apenas o "tocando agora" (endpoint leve, chamado com frequencia). */
